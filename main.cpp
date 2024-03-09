@@ -38,15 +38,22 @@ unsigned Config::get_sim_end_time(){
 
 class Simulation: public Config{
     public:
+        bool dbg;
         unsigned time;
         float intensity;
         Simulation(){
             this->time = 0;
+            this->dbg = false;
         }
         bool run();
+        void debug();
         void incrementTime();
         void incrementTime(unsigned);
 };
+
+void Simulation::debug(){
+    this->dbg = true;
+}
 
 bool Simulation::run(){
     if (time<=get_sim_end_time())
@@ -59,6 +66,10 @@ void Simulation::incrementTime(){
 }
 
 void Simulation::incrementTime(unsigned increment){
+    if(dbg){
+        std::cout<<"Incremented sim time by "<<increment<<"."
+        <<std::endl<<"Current sim time: "<<time<<"."<<std::endl;
+    }
     time+=increment;
 }
 
@@ -72,60 +83,77 @@ class User {
 
 class BaseStation: public Simulation{
     public:
-        unsigned id,users,resources,power;
+        unsigned id,resources,power;
+        unsigned users_rejected;
         bool hibernate;
-        std::vector<unsigned> user_service_time; 
-        std::vector<User*> users_list;
+        std::vector<User> users_list;
         BaseStation(){
             this->resources = num_of_resources();
-            this->users = 0;
             this->power = 0;
+            this->users_rejected = 0;
             this->hibernate = false;    
-            user_service_time.clear();
             users_list.clear();
         }   
-        void addUser();
-        void test();
-        unsigned get_user_service_time();
+        unsigned num_of_users();
+        bool isFull();
+        bool isEmpty();
 };
 
-unsigned BaseStation::get_user_service_time(){
-    return 1+rand()%30;
+bool BaseStation::isEmpty(){
+    if(users_list.empty())
+        return true;
+    return false;
 }
 
-void BaseStation::addUser(){
-    users++;
-    resources--;
-    user_service_time.push_back(get_user_service_time());
+bool BaseStation::isFull(){
+    if(num_of_users()==num_of_resources())
+        return true;
+    return false;
 }
 
-void BaseStation::test(){
-    User* usr = new User();
-    users_list.push_back(usr);
+unsigned BaseStation::num_of_users(){
+    return users_list.size();
 }
-
-/*void BaseStation::spawnUser(){
-    std::cout<<"----------------------"<<std::endl;
-    std::cout<<"Spawing user for station "<<id<<"."<<std::endl;
-    users++;
-    resources--;
-    std::cout<<"Delay for user: "<<getUserDelay()<<"."<<std::endl;
-    std::cout<<"Station "<<id<<" has "<<users<<" users and "<<resources
-    <<" resources left."<<std::endl;
-}*/
 
 class Network: public Simulation{
     public:
-        std::vector<BaseStation*> stations;
+        std::vector<BaseStation> stations;
+        unsigned next_event_time;
         Network(){
             for(unsigned i=0;i<num_of_stations();i++){
-                BaseStation* station = new BaseStation(); 
-                station->id = i;
+                BaseStation station;
+                station.id = i;
                 stations.push_back(station);
             }   
         }
         void config();
+        void addUser();
+        void getNextEvent();
+        bool all_stations_empty();
+        bool all_stations_full();
 };
+
+void Network::getNextEvent(){
+    incrementTime(next_event_time);
+}
+
+bool Network::all_stations_full(){
+    for(unsigned i=0;i<num_of_stations();i++){
+        if(stations[i].isFull())
+            continue;
+        return false;
+    }
+    return true;
+}
+
+bool Network::all_stations_empty(){
+    for(unsigned i=0;i<num_of_stations();i++){
+        if(stations[i].isEmpty())
+            continue;
+        return false;
+    }
+    return true;
+}
 
 void Network::config(){ 
     std::cout<<"--- NETWORK CONFIG ---"<<std::endl;
@@ -133,29 +161,42 @@ void Network::config(){
     std::cout<<"R:"<<num_of_resources()<<std::endl;
     std::cout<<"Sim_time:"<<get_sim_end_time()<<std::endl;
     for(unsigned i=0;i<num_of_stations();i++)
-        std::cout<<"STATION:"<<stations[i]->id<<
-        " RESOURCES:"<<stations[i]->resources<<std::endl;
+        std::cout<<"STATION:"<<stations[i].id<<
+        " RESOURCES:"<<stations[i].resources<<std::endl;
     std::cout<<"----------------------"<<std::endl;
 }
 
-void simulate(Simulation* sim, Network* net){
-    net->config();
-    while (sim->run()){
-        std::cout<<"Sim time:"<<sim->time<<std::endl;
-        for(unsigned i=0;i<net->num_of_stations();i++){
-            
-        }
-        sim->incrementTime();
+void Network::addUser(){
+    //Create a new user and attach it to BS
+    User usr;
+    if (stations.empty()){
+        std::cout<<"FATAL: no stations exist";
+    }
+    unsigned idx = rand()%num_of_stations();
+    stations[idx].users_list.push_back(usr);
+    std::cout<<"Added user to station "<<idx<<"."<<std::endl;
+    std::cout<<"Station "<<idx<<" has "<<stations[idx].users_list.size()<<" users."<<std::endl;
+}   
+
+void simulate(Simulation sim, Network net){
+    net.config();
+    while (sim.run()){
+        std::cout<<"------------------"<<std::endl;
+        if(net.all_stations_empty())
+            std::cout<<"ALL STATIONS ARE EMPTY.";
+        net.addUser(); 
+        sim.incrementTime(10);
     }
 }
 
 int main(){
     srand(time(NULL)); 
-    Config cfg();
-    Simulation* sim = new Simulation();
-    Network* net = new Network();
-    net->config();
+
+    Config cfg; //Create config for simulation
+    Simulation sim; //Init simulation with given config
+    sim.debug();
+    Network net; //Create the network
+
     simulate(sim,net);
-    delete net,sim;
     return 0;
 }
