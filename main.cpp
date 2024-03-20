@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <iterator>
 
-class Config{
+class Config{ /* Configuration */
     private:
         unsigned N; //num of base stations
         unsigned R; //num of resources
@@ -49,9 +49,14 @@ class Simulation: public Config{
         }
         bool run();
         void debug();
+        unsigned currSimTime();
         void incrementTime();
         void incrementTime(unsigned);
 };
+
+unsigned Simulation::currSimTime(){
+    return time;
+}
 
 void Simulation::debug(){
     this->dbg = true;
@@ -78,26 +83,48 @@ void Simulation::incrementTime(unsigned increment){
 
 class User: public Simulation {
     public:
+        unsigned service_start;
         unsigned service_time;
-        unsigned service_time_end;
-        int service_time_left;
-        bool marked; //mark to destroy
-        User(){
+        unsigned service_end;
+        User(unsigned stime){
+            this->service_start = stime;
             this->service_time = 1+rand()%30;
-            this->service_time_end = time + service_time;
-            this->service_time_left = service_time;
-            this->marked = false;
+            this->service_end = stime+service_time;
+            print();
         }
-        void recalcServiceTimeLeft();
+        void print();
 };
 
-void User::recalcServiceTimeLeft(){
-    service_time_left = service_time_end - time;
-    if (service_time_left < 0){
-        std::cout<<"Something went wrong, user should already be gone."<<std::endl;
-    } 
+void User::print(){
+    std::cout<<"--- USER CREATED ---"<<std::endl
+    <<"service_start: "<<service_start<<std::endl
+    <<"service_time: "<<service_time<<std::endl
+    <<"service_end: "<<service_end<<std::endl
+    <<"--------------------"<<std::endl;
 }
 
+class Event: public Simulation {
+    public: /* Event calendar */
+        unsigned time;
+        unsigned eid,sid,uid;
+        char type; /* 'A' - User arrives */
+                   /* 'D' - User departs */
+        Event(unsigned time, unsigned sid, char type){
+            this->sid = sid;
+            this->time = time;
+            this->type = type;
+            if (!(type == 'A' || type == 'D'))
+                abort();
+        } /* event_time, station id, event_type */
+};
+
+bool compareEvents(Event e1, Event e2){
+    return (e1.time > e2.time);
+}
+
+bool compareUsers(User u1, User u2){
+    return (u1.service_time > u2.service_time);
+}
 class BaseStation: public Simulation{
     public:
         unsigned id,resources,power;
@@ -113,15 +140,51 @@ class BaseStation: public Simulation{
             users_list.clear();
         }   
         unsigned num_of_users();
+        bool executeEvent(Event,std::vector<Event>*,unsigned);
+        Event scheduleEvent(unsigned);
         void getNextUserArrivalTime();
-        void addUser();
+        void printUsersList();
         bool isFull();
         bool isEmpty();
 };
 
-void BaseStation::addUser(){
-    User usr;
-    users_list.push_back(usr);
+void BaseStation::printUsersList(){
+    for (unsigned i=0;i<users_list.size();i++){
+        std::cout<<users_list[i].service_time<<" ";
+    }
+}
+
+bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, unsigned stime){   
+    std::cout<<"Event type:"<<event.type<<" time:"<<event.time<<std::endl; 
+    if (event.type == 'A'){
+        // Schedule user departure event if user is added
+        if (!isFull()){
+            User usr(stime);
+            Event event(usr.service_end,id,'D');
+            std::cout<<"Added user to station:"<<id<<" User end time:"<<usr.service_end<<std::endl;
+            users_list.push_back(usr);
+            event_list->push_back(event);
+            return true;
+        }
+        else //Handover to another station
+            return false;
+    }
+    else if (event.type == 'D'){
+        // User departs
+        sort(users_list.begin(), users_list.end(), compareUsers);
+        printUsersList();
+        users_list.pop_back();
+        return true;
+    }
+    else //Unknown event type
+        abort();
+}
+
+Event BaseStation::scheduleEvent(unsigned stime){
+    getNextUserArrivalTime();
+    std::cout<<"STIME:"<<stime<<std::endl;
+    Event event(next_user_time + stime, id, 'A');
+    return event;
 }
 
 void BaseStation::getNextUserArrivalTime(){
@@ -144,16 +207,17 @@ unsigned BaseStation::num_of_users(){
     return users_list.size();
 }
 
+
 class Network: public Simulation{
     public:
         std::vector<BaseStation> stations;
-        std::vector<unsigned> smallest_arrival_time_ids;
+        std::vector<Event> events_list;
         bool init;
         unsigned next_event_time;
         unsigned next_user;
         Network(){
             stations.clear();
-            smallest_arrival_time_ids.clear();
+            events_list.clear();
             init = true;
             for(unsigned i=0;i<num_of_stations();i++){
                 BaseStation station;
@@ -161,166 +225,87 @@ class Network: public Simulation{
                 stations.push_back(station);
             }   
         }
+        void methodABC(unsigned&);
+        void printEventList();
+        void printUsersAtStations();
         void config();
-        void addUser();
-        void addAllUsers();
-        void getNextEvent();
-        void recalcTimeLeftForAllUsers();
-        void calcNextUserArrivalTimeStations();
-        void findSmallestArrivalTime(std::vector<unsigned>);
-        void decideCase();
-        void markUsers(unsigned);
-        unsigned userEndsBeforeNextUser();
-        unsigned getSmallestServiceTimeUser();
+        void next_user_time_all_stations();
+        unsigned get_id_station_least_users();
         bool all_stations_empty();
         bool all_stations_full();
 };
 
-void Network::markUsers(unsigned min_service_time){
-    unsigned marked = 0;
-    for(int i=0;i<num_of_stations();i++){
-        for(int j=0;j<stations[i].num_of_users();j++){
-            if(min_service_time==stations[i].users_list[j].service_time){
-                stations[i].users_list[j].marked = true;
-                marked++;
+void Network::printUsersAtStations(){
+    std::cout<<"------------------"<<std::endl;
+    for(unsigned i=0;i<num_of_stations();i++){
+        std::cout<<"Station"<<i<<" has "<<stations[i].users_list.size()<<" users."<<std::endl;
+    }
+    std::cout<<"------------------"<<std::endl;
+}
+
+unsigned Network::get_id_station_least_users(){
+    unsigned min = stations[0].users_list.size();
+    unsigned sid = 0;
+    for(unsigned i=0;i<num_of_stations();i++){
+        if (stations[i].users_list.size()<min){
+            min = stations[i].users_list.size();
+            sid = i;
+        }
+    }
+    return sid;
+}
+
+void Network::printEventList(){
+    for(unsigned i=0;i<events_list.size();i++)
+        std::cout<<"E:"<<i<<" time:"<<events_list[i].time
+        <<" type:"<<events_list[i].type<<std::endl
+        <<"----------------"<<std::endl;
+}
+
+void Network::next_user_time_all_stations(){
+    for(unsigned i=0;i<num_of_stations();i++)
+        stations[i].getNextUserArrivalTime();
+}
+
+void Network::methodABC(unsigned &stime){
+    /* Phase A: Event Scheduling  */
+    for (unsigned i=0;i<num_of_stations();i++){
+        // Schedule arrival event
+        events_list.push_back(stations[i].scheduleEvent(stime));
+        //std::cout<<"E"<<i<<": "<<events_list[i].time<<std::endl;
+    }
+    std::cout<<"---"<<std::endl;
+    // Sort event list
+    sort(events_list.begin(), events_list.end(), compareEvents);
+    printEventList();
+    // Pop next event from calendar 
+    Event next_event = events_list.back();
+    // Remove event from calendar
+    events_list.pop_back();
+    // Increment sim time to nearest event
+    stime=next_event.time;
+    incrementTime(next_event.time);
+    // Execute nearest event
+    if(!stations[next_event.sid].executeEvent(next_event, &events_list, stime)){
+        // If station is FULL, handover event to non full station
+        // OR drop it.
+        if ( all_stations_full() ){
+            //if all stations are full, drop
+            std::cout<<"User dropped for station:"<<next_event.sid<<std::endl;
+        }
+        else{ //Try adding user to station with smallest amount of users
+            next_event.sid = get_id_station_least_users();
+            if (!stations[next_event.sid].executeEvent(next_event, &events_list, stime)){
+                abort(); //This acually should never happen
             }
         }
     }
-    std::cout<<"Marked "<<marked<<" users."<<std::endl;
-}
-
-unsigned Network::getSmallestServiceTimeUser(){
-    std::vector<unsigned> service_times;
-    for(unsigned i=0;i<num_of_stations();i++){
-        for(unsigned j=0;j<stations[i].num_of_users();j++){
-            service_times.push_back(stations[i].users_list[j].service_time);
-        }
-    }
-    unsigned min = *std::min_element(service_times.begin(), service_times.end());
-    return min;
-}
-
-void Network::recalcTimeLeftForAllUsers(){
-    for(unsigned i=0;i<num_of_stations();i++){
-        for(unsigned j=0;j<stations[i].users_list.size();j++){
-            stations[i].users_list[j].recalcServiceTimeLeft();
-        }
-    }
-}
-
-unsigned Network::userEndsBeforeNextUser(){
-    /*check if a user from any station finishes before
-    next user arrives at given station.
-    There are 3 possiblities:
-    1: Any user doesnt end before next arrives
-    2: User arrives at the same time user ends
-    3: User ends before next arrives*/
-    recalcTimeLeftForAllUsers();
-    for(unsigned i=0;i<num_of_stations();i++){
-        for(unsigned j=0;j<stations[i].users_list.size();j++){
-            if(stations[i].users_list[j].service_time<next_user)
-                return 3;
-        }
-    }
-}
-
-void Network::findSmallestArrivalTime(std::vector<unsigned> arrival_times){
-    unsigned min = *std::min_element(arrival_times.begin(), arrival_times.end());
-    next_user = min;
-    //check if some stations have the same arrival time
-    for(unsigned i=0;i<num_of_stations();i++){
-        if (min == stations[i].next_user_time)
-            smallest_arrival_time_ids.push_back(stations[i].id);
-    }
-    if(smallest_arrival_time_ids.size()>1){
-        std::cout<<"There are stations with same arrival time ("<<min<<")."<<std::endl;
-        std::cout<<"Those are stations:";
-        for(unsigned i=0;i<smallest_arrival_time_ids.size();i++){
-            std::cout<<smallest_arrival_time_ids[i]<<" ";
-        }
-        std::cout<<std::endl;
-    } else{
-        std::cout<<"Station with smallest arrival time:"<<smallest_arrival_time_ids[0];
-        std::cout<<std::endl;
-    }
-}
-
-void Network::calcNextUserArrivalTimeStations(){
-    std::vector<unsigned> arrival_times;
-    for(unsigned i=0;i<num_of_stations();i++){
-        stations[i].getNextUserArrivalTime();
-        arrival_times.push_back(stations[i].next_user_time);
-    }
-    next_user = *std::min_element(arrival_times.begin(), arrival_times.end());
-    //now check if stations there are more stations with smalles arrival time for user.
-    //std::vector<unsigned> smallest_arrival_time_ids;
-    //check if some stations have the same arrival time
-    for(unsigned i=0;i<num_of_stations();i++){
-        if (next_user == stations[i].next_user_time)
-            smallest_arrival_time_ids.push_back(stations[i].id);
-    }
-    if(smallest_arrival_time_ids.size()>1){
-        std::cout<<"There are stations with same arrival time ("<<next_user<<")."<<std::endl;
-        std::cout<<"Those are stations: ";
-        for(unsigned i=0;i<smallest_arrival_time_ids.size();i++){
-            std::cout<<smallest_arrival_time_ids[i]<<" ";
-        }
-        std::cout<<std::endl;
-    } else{
-        std::cout<<"Station with smallest arrival time ("<<next_user<<")->"<<smallest_arrival_time_ids[0];
-        std::cout<<std::endl;
-    }
-    next_event_time = next_user;
-    if(all_stations_empty()){ //all stations are empty
-       addAllUsers();
-    }
-    else{ //check if any user/users finish before next arrives
-        decideCase();
-        //must check if station is full etc.
-    }
-}
-
-void Network::addAllUsers(){
-    for(unsigned i=0;i<smallest_arrival_time_ids.size();i++){
-            stations[smallest_arrival_time_ids[i]].addUser();
-            std::cout<<"Added user to station "<<smallest_arrival_time_ids[i]<<"."
-            <<" Service time for user:"<<stations[smallest_arrival_time_ids[i]].users_list.back().service_time
-            <<std::endl;
-        }
-    smallest_arrival_time_ids.clear();
-}
-void Network::decideCase(){
-    /*There are 3 possiblities:
-    1: Any user doesnt end before next arrives
-    2: User arrives at the same time user ends
-    3: User ends before next arrives*/
-    unsigned min_service_time = getSmallestServiceTimeUser();
-    if (min_service_time>next_user){
-        //then next event is next user arriving
-        //just add user
-        next_event_time = next_user;
-        addAllUsers();
-        return;
-    }
-    else if (min_service_time==next_user){
-        //next event is next user arriving and user ending
-        next_event_time = next_user;
-        //destroy user and add new one
-        markUsers(min_service_time);
-        addAllUsers();
-        //get the id of users that finish and destory them
-    }
-    else {
-        markUsers(min_service_time);
-        //user ends before next arrives
-    }
-}
-
-void Network::getNextEvent(){
-    calcNextUserArrivalTimeStations();
-    smallest_arrival_time_ids.clear();
-    //now check if before next user comes, some user ends.
-    //incrementTime(next_event_time); 
+    // Sort events again
+    sort(events_list.begin(), events_list.end(), compareEvents);
+    printEventList();
+    std::cout<<"DONE: Phase A -> SIM TIME = "<<stime<<std::endl;
+    /*****************************/
+    /* Phase B */
 }
 
 bool Network::all_stations_full(){
@@ -345,45 +330,36 @@ void Network::config(){
     std::cout<<"--- NETWORK CONFIG ---"<<std::endl;
     std::cout<<"N:"<<num_of_stations()<<std::endl;
     std::cout<<"R:"<<num_of_resources()<<std::endl;
-    std::cout<<"Sim_time:"<<get_sim_end_time()<<std::endl;
+    std::cout<<"SIM_END_TIME:"<<get_sim_end_time()<<std::endl;
     for(unsigned i=0;i<num_of_stations();i++)
         std::cout<<"STATION:"<<stations[i].id<<
         " RESOURCES:"<<stations[i].resources<<std::endl;
     std::cout<<"----------------------"<<std::endl;
 }
 
-void Network::addUser(){
-    //Create a new user and attach it to BS
-    User usr;
-    if (stations.empty()){
-        std::cout<<"FATAL: no stations exist";
-    }
-    unsigned idx = rand()%num_of_stations();
-    stations[idx].users_list.push_back(usr);
-    std::cout<<"Added user to station "<<idx<<"."<<std::endl;
-    std::cout<<"Station "<<idx<<" has "<<stations[idx].users_list.size()<<" users."<<std::endl;
-}   
-
-void simulate(Simulation sim, Network net){
+void simulate(Simulation sim, Network net, unsigned iters){
     net.config();
-    while (sim.run()){
-        std::cout<<"------------------"<<std::endl;
-        if(net.all_stations_empty())
-            std::cout<<"ALL STATIONS ARE EMPTY."<<std::endl;
-        net.getNextEvent();
-        std::cout<<"NEXT EVENT TIME:"<<net.next_event_time<<std::endl;
-        sim.incrementTime(net.next_event_time);
+    unsigned i = 0;
+    unsigned stime = 0;
+    while ( sim.run() && (i<=iters) ){
+        std::cout<<"----------------------"<<std::endl;
+        net.methodABC(stime);
+        net.printUsersAtStations();
+        std::cout<<"SID:"<<net.get_id_station_least_users()<<std::endl;
+        i++;
     }
 }
 
 int main(){
-    srand(time(NULL)); 
-
+    //srand(time(NULL)); 
+    srand(0);
+    
     Config cfg; //Create config for simulation
     Simulation sim; //Init simulation with given config
     sim.debug();
     Network net; //Create the network
 
-    simulate(sim,net);
+    simulate(sim, net, 5);
+    
     return 0;
 }
