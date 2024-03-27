@@ -66,7 +66,7 @@ class Simulation: public Config{
             this->end_time = get_sim_end_time();
             this->dbg = false;
             this->factor = 0.5;
-            this->lambda = 5;
+            this->lambda = 20;
             this->intensity = factor*lambda;
             this->event_counter = 0;
             this->hours = 60*60*1000;
@@ -173,6 +173,20 @@ bool compareUsers(User u1, User u2){
     return (u1.service_time > u2.service_time);
 }
 
+void insertEvent(std::vector<Event>* events_list, Event event){
+    //std::cout<<"Size: "<<events_list->size()<<std::endl;
+    if (events_list->size() < 2)
+        abort();
+    for (unsigned i=0;i<events_list->size();i++){
+        if ((*events_list)[i].time<=event.time){
+            events_list->insert(events_list->begin()+i,event);
+            return;
+        }
+    }
+    events_list->push_back(event);
+    return;
+}
+
 class exponentialGenerator{
     public:
         std::random_device rd;
@@ -180,11 +194,6 @@ class exponentialGenerator{
         double get(double);
 };
 
-double exponentialGenerator::get(double intensity){
-    std::exponential_distribution<double> exp_dist(intensity);
-    std::mt19937 gen(rd());
-    return 1000*exp_dist(gen);
-}
 class BaseStation: public Config{
     public:
         unsigned id,resources,power;
@@ -192,14 +201,12 @@ class BaseStation: public Config{
         unsigned next_user_time;
         bool hibernate;
         std::vector<User> users_list;
-        exponentialGenerator* gen = nullptr;
         BaseStation(){
             this->resources = num_of_resources();
             this->power = 0;
             this->users_rejected = 0;
             this->hibernate = false;    
             users_list.clear();
-            gen = new exponentialGenerator();
         }   
         unsigned num_of_users();
         double currentUsage();
@@ -240,18 +247,20 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
     //std::cout<<"Event type:"<<event.type<<" time:"<<event.time<<std::endl; 
     if (event.type == 'A'){
         // Schedule next user arriving at that station
-        if (!handover){ 
+        if (!handover){
             sim->users_counter++;
             getNextUserArrivalTime(sim);
             Event eve(sim->time + next_user_time,id,'A');
-            event_list->push_back(eve);
+            insertEvent(event_list, eve);
+            //event_list->push_back(eve);
         }
         // Schedule user departure event if user is added
         if (!isFull()){
             User usr(sim->time);
             users_list.push_back(usr);
             Event event(usr.service_end,id,'D');
-            event_list->push_back(event);
+            insertEvent(event_list, event);
+            //event_list->push_back(event);
             //std::cout<<"Added user to station:"<<id<<" User end time:"<<usr.service_end<<std::endl;
             return true;
         }
@@ -260,7 +269,7 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
     }
     else if (event.type == 'D'){
         // User departs
-        sort(users_list.begin(), users_list.end(), compareUsers);
+        //sort(users_list.begin(), users_list.end(), compareUsers);
         //printUsersList();
         users_list.pop_back();
         return true;
@@ -276,12 +285,11 @@ Event BaseStation::scheduleEvent(Simulation* sim){
 }
 
 void BaseStation::getNextUserArrivalTime(Simulation* sim){
-    //std::random_device rd;
-    //std::mt19937 gen(rd());
-    //std::exponential_distribution<double> exp_dist(sim->intensity);
-    // Generate a random value
+    std::mt19937 gen(rand());
     sim->changeIntensity(); 
-    next_user_time = gen->get(sim->intensity); //1000*exp_dist(gen);
+    std::exponential_distribution<double> exp_dist(sim->intensity);
+    // Generate a random value
+    next_user_time = 1000*exp_dist(gen);
 
 }
 
@@ -316,7 +324,7 @@ class Network: public Config{
                 BaseStation station;
                 station.id = i;
                 stations.push_back(station);
-            }   
+            }
         }
         void methodABC(Simulation*);
         unsigned get_id_station_least_users();
@@ -380,12 +388,10 @@ void Network::methodABC(Simulation* sim){
         for (unsigned i=0;i<num_of_stations();i++){
             // Schedule first arrival events at all stations
             events_list.push_back(stations[i].scheduleEvent(sim));
+            //insertEvent(&events_list, stations[i].scheduleEvent(sim));
         }
+        sort(events_list.begin(), events_list.end(), compareEvents); 
     }
-    //std::cout<<"---"<<std::endl;
-    // Sort event list
-    sort(events_list.begin(), events_list.end(), compareEvents);
-    //printEventList();
     Event next_event = events_list.back(); // Pop next event from calendar 
     sim->event_counter++;
     events_list.pop_back(); // Remove event from calendar
@@ -400,7 +406,7 @@ void Network::methodABC(Simulation* sim){
     // Execute nearest event
     if(!stations[next_event.sid].executeEvent(next_event, &events_list, sim, false)){
         // If station is FULL, handover event to non full station OR drop it.
-        if ( all_stations_full() ){
+        if (all_stations_full()){
             //if all stations are full, drop
             //std::cout<<"User dropped for station:"<<next_event.sid<<std::endl;
             stations[next_event.sid].users_rejected++;
@@ -408,12 +414,10 @@ void Network::methodABC(Simulation* sim){
         else{ //Try adding user to station with smallest amount of users
             next_event.sid = get_id_station_least_users();
             if (!stations[next_event.sid].executeEvent(next_event, &events_list, sim, true)){
-                abort(); //This acually should never happen
+                abort(); //This actually should never happen
             }
         }
     } 
-    // Sort events again
-    //sort(events_list.begin(), events_list.end(), compareEvents);
     //printEventList();
 
     //std::cout<<"DONE: Phase A -> SIM TIME = "<<sim->time<<" [ms]"<<std::endl;
@@ -455,7 +459,7 @@ void Network::config(){
 void simulate(Simulation sim, Network net, unsigned iters=10000){
     net.config();
     unsigned i = 0;
-    while ( sim.run() /* && (i<=iters)*/ ){
+    while ( sim.run() /*&& (i<=iters)*/ ){
         //std::cout<<"----------------------"<<std::endl;
         net.methodABC(&sim);
         //net.printUsersAtStations();
