@@ -154,13 +154,14 @@ class Event {
     public: /* Event calendar */
         unsigned time;
         unsigned eid,sid,uid;
-        char type; /* 'A' - User arrives */
-                   /* 'D' - User departs */
+        char type; /* 'A' - User arrives  */
+                   /* 'D' - User departs  */
+                   /* 'S' - Station event */
         Event(unsigned time, unsigned sid, char type){
             this->sid = sid;
             this->time = time;
             this->type = type;
-            if (!(type == 'A' || type == 'D'))
+            if (!(type == 'A' || type == 'D' || type == 'S'))
                 abort();
         } /* event_time, station id, event_type */
 };
@@ -187,29 +188,24 @@ void insertEvent(std::vector<Event>* events_list, Event event){
     return;
 }
 
-class exponentialGenerator{
-    public:
-        std::random_device rd;
-        exponentialGenerator(){}
-        double get(double);
-};
-
 class BaseStation: public Config{
     public:
-        unsigned id,resources,power;
+        unsigned id,resources;
         unsigned users_rejected;
         unsigned next_user_time;
+        double power;
         bool hibernate;
         std::vector<User> users_list;
         BaseStation(){
             this->resources = num_of_resources();
-            this->power = 0;
+            this->power = 0.00;
             this->users_rejected = 0;
-            this->hibernate = false;    
+            this->hibernate = true;    
             users_list.clear();
         }   
         unsigned num_of_users();
         double currentUsage();
+        double currentPower(unsigned);
         bool executeEvent(Event,std::vector<Event>*,Simulation*,bool);
         Event scheduleEvent(Simulation*);
         void getNextUserArrivalTime(Simulation*);
@@ -231,6 +227,10 @@ void BaseStation::deactivate(){
 
 bool BaseStation::isHibernated(){
     return hibernate;
+}
+
+double BaseStation::currentPower(unsigned duration){
+    return static_cast<double>(duration*200);
 }
 
 double BaseStation::currentUsage(){
@@ -255,7 +255,7 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
             //event_list->push_back(eve);
         }
         // Schedule user departure event if user is added
-        if (!isFull()){
+        if (!isFull()&&!isHibernated()){
             User usr(sim->time);
             users_list.push_back(usr);
             Event event(usr.service_end,id,'D');
@@ -273,6 +273,9 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
         //printUsersList();
         users_list.pop_back();
         return true;
+    }
+    else if (event.type == 'S'){
+        // Handle events like turning station on/off
     }
     else //Unknown event type
         abort();
@@ -314,10 +317,12 @@ class Network: public Config{
         std::vector<BaseStation> stations;
         std::vector<Event> events_list;
         double total_usage;
+        double total_power;
         unsigned next_event_time;
         unsigned next_user;
         Network(){
             total_usage = 0;
+            total_power = 0;
             stations.clear();
             events_list.clear();
             for(unsigned i=0;i<num_of_stations();i++){
@@ -331,13 +336,28 @@ class Network: public Config{
         bool all_stations_empty();
         bool all_stations_full();
         void calcStationsUsage(unsigned);
+        void calcStationsPower(unsigned);
+        double getTotalPowerUsage();
         unsigned calcTotalUsersRejected();
         /* Utility */
         void printEventList();
+        void printStationsState();
         void printUsersAtStations();
         void config();
         /**********/
 };
+
+double Network::getTotalPowerUsage(){
+    for (auto x : stations)
+        total_power+=x.power;
+    return total_power;
+}
+
+void Network::calcStationsPower(unsigned duration){
+    for (unsigned i=0;i<num_of_stations();i++){
+        stations[i].power += stations[i].currentPower(duration);
+    }
+}
 
 unsigned Network::calcTotalUsersRejected(){
     unsigned sum = 0;
@@ -360,6 +380,17 @@ void Network::printUsersAtStations(){
     std::cout<<"------------------"<<std::endl;
     for(unsigned i=0;i<num_of_stations();i++){
         std::cout<<"Station"<<i<<" has "<<stations[i].users_list.size()<<" users."<<std::endl;
+    }
+}
+
+void Network::printStationsState(){
+    std::string state = "";
+    for (auto x : stations){
+        if (!x.isHibernated())
+            state = "ON";
+        else
+            state = "OFF";
+        std::cout<<"Station"<<x.id<<" is "<<state<<std::endl;
     }
 }
 
@@ -387,10 +418,14 @@ void Network::methodABC(Simulation* sim){
     if (events_list.empty()){ // Initial state of network
         for (unsigned i=0;i<num_of_stations();i++){
             // Schedule first arrival events at all stations
+            if (!i) //Active only 1 station
+                stations[i].activate();
+            stations[i].activate();
             events_list.push_back(stations[i].scheduleEvent(sim));
             //insertEvent(&events_list, stations[i].scheduleEvent(sim));
         }
-        sort(events_list.begin(), events_list.end(), compareEvents); 
+        printStationsState();
+        sort(events_list.begin(), events_list.end(), compareEvents);
     }
     Event next_event = events_list.back(); // Pop next event from calendar 
     sim->event_counter++;
@@ -402,6 +437,7 @@ void Network::methodABC(Simulation* sim){
         return;
     }
     calcStationsUsage(next_event.time - sim->time);
+    calcStationsPower(next_event.time - sim->time);
     sim->time = next_event.time;
     // Execute nearest event
     if(!stations[next_event.sid].executeEvent(next_event, &events_list, sim, false)){
@@ -413,11 +449,14 @@ void Network::methodABC(Simulation* sim){
         }
         else{ //Try adding user to station with smallest amount of users
             next_event.sid = get_id_station_least_users();
+            stations[next_event.sid].activate();
             if (!stations[next_event.sid].executeEvent(next_event, &events_list, sim, true)){
                 abort(); //This actually should never happen
             }
         }
     } 
+    // Sort events again
+    //sort(events_list.begin(), events_list.end(), compareEvents);
     //printEventList();
 
     //std::cout<<"DONE: Phase A -> SIM TIME = "<<sim->time<<" [ms]"<<std::endl;
@@ -470,6 +509,7 @@ void simulate(Simulation sim, Network net, unsigned iters=10000){
     net.printUsersAtStations();
     std::cout<<"TOTAL EVENTS: "<<sim.event_counter<<std::endl;
     std::cout<<"AVERAGE USAGE: "<<100*(net.total_usage/sim.get_sim_end_time())<<"%"<<std::endl;
+    std::cout<<"TOTAL POWER USAGE: "<<net.getTotalPowerUsage()/sim.get_sim_end_time()<<" W"<<std::endl;
     std::cout<<"TOTAL USERS CREATED: "<<sim.users_counter<<std::endl;
     std::cout<<"USERS REJECTED: "<<100*(static_cast<double>(net.calcTotalUsersRejected())/sim.users_counter)<<"%";
 }
