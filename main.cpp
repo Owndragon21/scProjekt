@@ -55,6 +55,8 @@ float Config::getH(){
     return H;
 }
 
+enum Phase{ phase1 = 1, phase2 = 2, phase3 = 3, phase4 = 4, unknown = -1 };
+
 class Simulation: public Config{
     public:
         bool dbg, disable_sleep;
@@ -63,20 +65,21 @@ class Simulation: public Config{
         unsigned hours;
         double intensity, factor, lambda;
         float L, H;
+        Phase phase;
         Simulation(){
             time = 0; end_time = get_sim_end_time();
             dbg = false; disable_sleep = false;
-            factor = 0.5; lambda = 20; intensity = factor*lambda;
-            event_counter = 0;
+            factor = 0.5; lambda = 10; intensity = factor*lambda;
+            event_counter = 0; users_counter = 0;
             hours = 60*60*1000;
             L = getL(); H = getH();
+            phase = Phase::phase1;
         }
         bool run();
         void debug();
         void changeIntensity();
+        void cI();
 };
-
-enum Phase{ phase1 = 1, phase2 = 2, phase3 = 3, phase4 = 4, unknown = -1 };
 
 Phase getPhase(unsigned stime, unsigned hours){
     stime = stime % (24*hours);
@@ -144,6 +147,46 @@ void Simulation::changeIntensity(){
     return;
 }
 
+void Simulation::cI(){
+    switch(phase){
+        case phase1:
+            phase = Phase::phase2;
+            factor = 0.75;
+            std::cout << "Intensity changed from:"<<intensity;
+            intensity = factor*lambda;
+            std::cout<<" to:"<<intensity<<std::endl;
+            break;
+
+        case phase2:
+            phase = Phase::phase3;
+            factor = 1.00;
+            std::cout << "Intensity changed from:"<<intensity;
+            intensity = factor*lambda;
+            std::cout<<" to:"<<intensity<<std::endl;
+            break;
+        
+        case phase3:
+            phase = Phase::phase4;
+            factor = 0.75;
+            std::cout << "Intensity changed from:"<<intensity;
+            intensity = factor*lambda;
+            std::cout<<" to:"<<intensity<<std::endl;
+            break;
+        
+        case phase4:
+            phase= Phase::phase1;
+            factor = 0.50;
+            std::cout << "Intensity changed from:"<<intensity;
+            intensity = factor*lambda;
+            std::cout<<" to:"<<intensity<<std::endl;
+            break;
+        
+        default:
+            abort();
+    }
+    return;
+}
+
 void Simulation::debug(){
     this->dbg = true;
 }
@@ -161,7 +204,7 @@ class User {
         unsigned service_end;
         User(unsigned sim_time){
             this->service_start = sim_time;
-            this->service_time = 1000+rand()%30000; // 1-30[s]
+            this->service_time = 1000+rand()%29001; // 1-30[s]
             this->service_end = sim_time+service_time;
             //print();
         }
@@ -180,8 +223,10 @@ enum class eventType{
     Arrival,
     Departure,
     ActivateStation,
-    HibernateStation
+    HibernateStation,
+    Intensity
 };
+
 class Event {
     public: /* Event calendar */
         unsigned time;
@@ -236,7 +281,7 @@ class BaseStation: public Config{
         unsigned num_of_users();
         double currentUsage();
         double currentPower(unsigned);
-        bool executeEvent(Event,std::vector<Event>*,Simulation*,bool);
+        bool executeEvent(Event, std::vector<Event>*, Simulation*, bool);
         Event scheduleEvent(Simulation*);
         void getNextUserArrivalTime(Simulation*);
         void printUsersList();
@@ -248,8 +293,6 @@ class BaseStation: public Config{
 };
 
 double BaseStation::currentPower(unsigned duration){
-    //if (scheduled_state_change) //Transition
-    //   static_cast<double>(duration*1000);
     return static_cast<double>(duration*(isHibernated() ? 1 : 200));
 }
 
@@ -291,29 +334,34 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
                 Event event(usr.service_end, id, eventType::Departure); // Schedule user departure event if user is added
                 insertEvent(event_list, event);
                 //std::cout<<"Added user to station:"<<id<<" User end time:"<<usr.service_end<<std::endl;
-                return true;
+                break;
             }
-            else //Handover to another station
-                return false;
+            else
+                return false; // Handover to another station
 
         case eventType::Departure: // User departs
             users_list.pop_back();
-            return true;
+            break;
 
         case eventType::ActivateStation: // Activate hiberanted station event
             activate();
             scheduled_state_change = false;
             hit_20_before = false;
-            return true;
+            break;
 
         case eventType::HibernateStation: // Hibernate active station event
             deactivate();
             scheduled_state_change = false;
-            return true;
+            break;
 
+        case eventType::Intensity:
+            sim->cI();
+            break;
+        
         default: //Unknown event type
             abort();
     }
+    return true; // Event executed
 }
 
 
@@ -325,11 +373,9 @@ Event BaseStation::scheduleEvent(Simulation* sim){
 
 void BaseStation::getNextUserArrivalTime(Simulation* sim){
     std::mt19937 gen(rand());
-    sim->changeIntensity(); 
+    //sim->changeIntensity(); 
     std::exponential_distribution<double> exp_dist(sim->intensity);
-    // Generate a random value
     next_user_time = 1000*exp_dist(gen);
-
 }
 
 bool BaseStation::isEmpty(){
@@ -367,6 +413,7 @@ class Network: public Config{
         void methodABC(Simulation*);
 
         void changeStationStatesIfNeeded(Simulation*);
+        void scheduleIntensityChange(Simulation*);
         unsigned get_id_station_least_users();
         unsigned get_id_station_not_hibernated();
 
@@ -391,6 +438,17 @@ class Network: public Config{
         void config();
         /**********/
 };
+
+void Network::scheduleIntensityChange(Simulation* sim){
+    unsigned day = 1 + (sim->time)/(24*60*60*1000);
+    const unsigned h[4] = {8,14,18,24};
+    for (unsigned i=1;i<=day;i++){
+        for (unsigned j=0;j<=3;j++){
+            Event event(day*h[j]*60*60*1000, 0, eventType::Intensity);
+            insertEvent(&events_list, event);
+        }
+    }
+}
 
 bool Network::isStationEvent(Event event){
     return (event.type == eventType::ActivateStation || event.type == eventType::HibernateStation);
@@ -476,7 +534,7 @@ void Network::changeStationStatesIfNeeded(Simulation* sim){
             Event event(sim->time+50, stations[i].id, eventType::ActivateStation); // Turning station ON/OFF takes 50 [ms]
             std::cout<<"Scheduling event to activate station"<<stations[i].id<<"."<<std::endl;
             std::cout<<"SIM TIME:"<<sim->time<<std::endl;
-            insertEvent(&events_list,event);
+            insertEvent(&events_list, event);
         }
         else if (!(stations[i].isHibernated()) && (stations[i].currentUsage() < getL()) && !(isOnlyActiveStation(stations[i].id)) && (stations[i].hit_20_before) && (!stations[i].scheduled_state_change)){ // Never deactivate only active station
             // Active station should be hibernated (schedule event)
@@ -484,7 +542,7 @@ void Network::changeStationStatesIfNeeded(Simulation* sim){
             Event event(sim->time+50, stations[i].id, eventType::HibernateStation); // Turning station ON/OFF takes 50 [ms]
             std::cout<<"Scheduling event to deactivate station"<<stations[i].id<<". USAGE: "<<100*stations[i].currentUsage()<<std::endl;
             std::cout<<"SIM TIME:"<<sim->time<<std::endl;
-            insertEvent(&events_list,event);
+            insertEvent(&events_list, event);
         }
         else
             continue; // Do not change state of that station
@@ -539,56 +597,62 @@ void Network::methodABC(Simulation* sim){
     /* Phase A: Event Scheduling  */
     if (events_list.empty()){ // Initial state of network
         for (unsigned i=0;i<num_of_stations();i++){
-            if (sim->disable_sleep)
-                stations[i].activate();
-            if (!i) //Activate only one station at first
-                stations[i].activate();
+            if (sim->disable_sleep) stations[i].activate();
+            if (!i) stations[i].activate(); //Activate only one station at first
             events_list.push_back(stations[i].scheduleEvent(sim)); // Schedule first arrival events at all stations
         }
-        sort(events_list.begin(), events_list.end(), compareEvents); 
+        scheduleIntensityChange(sim);
+        sort(events_list.begin(), events_list.end(), compareEvents);
     }
+
     Event next_event = events_list.back(); // Pop next event from calendar 
-    sim->event_counter++;
     events_list.pop_back(); // Remove event from calendar
-    
+    sim->event_counter++;
+
     if (next_event.time > sim->end_time){ //If next event is after sim end time
         calcStationsUsage(sim->end_time - sim->time);
         calcStationsPower(next_event.time - sim->time, isStationEvent(next_event));
         sim->time = sim->end_time;
         return;
     }
-
     calcStationsUsage(next_event.time - sim->time);
     calcStationsPower(next_event.time - sim->time, isStationEvent(next_event));
+
     sim->time = next_event.time; // Increment sim time to nearest event
-    
+
+    bool dropped = false;
     if(!stations[next_event.sid].executeEvent(next_event, &events_list, sim, false)){ // Execute nearest event
         if (all_stations_full()){ // If station is FULL, handover event to non full station OR drop it.
             //std::cout<<"User dropped for station:"<<next_event.sid<<std::endl;
-            stations[next_event.sid].users_rejected++;
+            //stations[next_event.sid].users_rejected++;
+            dropped = true;
         }
         else{ //Try adding user to station with smallest amount of users
             //next_event.sid = get_id_station_least_users();
             next_event.sid = get_id_station_not_hibernated();
             if (!stations[next_event.sid].executeEvent(next_event, &events_list, sim, true)){
-                std::cout<<"Here:";
                 abort(); //This actually should never happen
             }
         }
     }
-    if (!sim->disable_sleep) 
-        changeStationStatesIfNeeded(sim);
+    //std::cout<<"DONE: Phase A -> SIM TIME = "<<sim->time<<" [ms]"<<std::endl;
+    /*****************************/
+
+    /* Phase B: Conditional Events */
+    if (!sim->disable_sleep) changeStationStatesIfNeeded(sim);
+    if (dropped) stations[next_event.sid].users_rejected++;
+    //sim->changeIntensity();
+    /*******************************/
+
     double u = 0.0;
-    for (auto x : stations){
-        u += x.currentUsage();
-    }
+    for (auto x : stations) u += x.currentUsage();
+
     //std::cerr<<"sim time:"<<sim->time<<" usage:"<<100*(u/num_of_stations())<<"%"<<std::endl;
+
     //printEventList();
     //std::cout<<"DONE: Phase A -> SIM TIME = "<<sim->time<<" [ms]"<<std::endl;
     //std::cout<<"TOTAL USERS AT STATIONS: "<<total_users<<std::endl;
     //std::cout<<"TOTAL EVENTS: "<<sim->event_counter<<std::endl;
-    /*****************************/
-    /* Phase B */
 }
 
 bool Network::all_stations_full(){
@@ -642,6 +706,7 @@ int main(void){
     srand(time(NULL)); 
     std::clock_t c_start = std::clock();
     freopen("simlog.txt","w",stderr);
+
     Config cfg; //Create config for simulation
     Simulation sim; //Init simulation with given config
     sim.debug();
