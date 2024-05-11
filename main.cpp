@@ -19,58 +19,9 @@
         <<" ("<<#condition<<")"<<std::endl; \
     }
 
-class Config{ /* Configuration */
-    private:
-        unsigned N; //num of base stations
-        unsigned R; //num of resources
-        unsigned sim_time; //time of sim
-        float L;
-        float H;
-    public:
-        Config(){
-            this->N = 3;
-            this->R = 273;
-            this->sim_time = 24*60*60*1000;
-            this->L=0.2;
-            this->H=0.8;
-        }
-        Config(unsigned N, unsigned R, unsigned sim_time, float L, float H){
-            this->N = N;
-            this->R = R;
-            this->sim_time = sim_time;
-            this->L=0.2;
-            this->H=0.8;
-        }
-        unsigned num_of_stations();
-        unsigned num_of_resources();
-        unsigned get_sim_end_time();
-        float getL();
-        float getH();
-};
-
-unsigned Config::num_of_stations(){
-    return N;
-}
-
-unsigned Config::num_of_resources(){
-    return R;
-}
-
-unsigned Config::get_sim_end_time(){
-    return sim_time;
-}
-
-float Config::getL(){
-    return L;
-}
-
-float Config::getH(){
-    return H;
-}
-
 enum Phase{ phase1 = 1, phase2 = 2, phase3 = 3, phase4 = 4, unknown = -1 };
 
-class Simulation: public Config{
+class Simulation{
     public:
         bool dbg, disable_sleep;
         unsigned time, end_time;
@@ -78,16 +29,22 @@ class Simulation: public Config{
         unsigned hours;
         double intensity, factor, lambda;
         float L, H;
+        unsigned N, R;
         Phase phase;
-        Simulation(double lambda = 0.00){
-            time = 0; end_time = get_sim_end_time();
+        Simulation(unsigned N = 3, unsigned R = 273,
+                   float L = 0.2, float H = 0.8,
+                   unsigned end_time = 24*60*60*1000,
+                   double lambda = 5.00) {
+            time = 0; this->end_time = end_time;
             dbg = false; disable_sleep = false;
             factor = 0.5; this->lambda = lambda /*5*/; intensity = factor*lambda;
             event_counter = 0; users_counter = 0;
             hours = 60*60*1000;
-            L = getL(); H = getH();
+            this->N = N; this->R = R;
+            this->L = L; this->H = H;
             phase = Phase::phase1;
         }
+
         bool run();
         void debug();
         void changeIntensity();
@@ -111,11 +68,11 @@ Phase getPhase(unsigned stime, unsigned hours){
 void Simulation::config(){
     std::cout<<"--- SIMULATION CONFIG ---"<<std::endl;
     std::cout<<"LAMBDA:"<<lambda<<std::endl;
-    std::cout<<"L:"<<getL()<<std::endl;
-    std::cout<<"H:"<<getH()<<std::endl;
-    std::cout<<"SIM_END_TIME:"<<get_sim_end_time()<<" [ms]"<<std::endl;
+    std::cout<<"L:"<<L<<std::endl;
+    std::cout<<"H:"<<H<<std::endl;
+    std::cout<<"SIM_END_TIME:"<<end_time<<" [ms]"<<std::endl;
     std::cout<<"DISABLE SLEEP:";
-    disable_sleep?std::cout<<"Yes":std::cout<<"No";
+    disable_sleep ? std::cout<<"Yes" : std::cout<<"No";
     std::cout<<std::endl;
     std::cout<<"-------------------------"<<std::endl;
 }
@@ -161,7 +118,7 @@ void Simulation::debug(){
 }
 
 bool Simulation::run(){
-    if (time<get_sim_end_time())
+    if (time < end_time)
         return true;
     return false;
 }
@@ -202,7 +159,7 @@ void insertEvent(std::vector<Event>* events_list, Event event){
     return;
 }
 
-class BaseStation: public Config{
+class BaseStation{
     public:
         unsigned id, resources, users;
         unsigned users_rejected;
@@ -210,9 +167,11 @@ class BaseStation: public Config{
         double power;
         bool hibernate, scheduled_state_change;
         bool overloaded, triggered;
-        //std::vector<User> users_list;
-        BaseStation(){
-            this->resources = num_of_resources();
+        Simulation* baseSim = nullptr; // scope to all BaseStation methods
+        BaseStation(Simulation* sim){
+            baseSim = sim;
+            assert(baseSim);
+            this->resources = baseSim->R;
             this->power = 0.00;
             this->users_rejected = 0;
             this->hibernate = true;
@@ -220,24 +179,22 @@ class BaseStation: public Config{
             this->overloaded = false;
             this->triggered = false;
             this->users = 0;
-            //users_list.clear();
         }   
         double currentUsage();
         double currentPower(unsigned);
         bool executeEvent(Event, std::vector<Event>*, Simulation*, bool);
         Event scheduleEvent(Simulation*);
-        void getNextUserArrivalTime(Simulation*);
+        void getNextUserArrivalTime(Simulation*);   
         void activate();
         void deactivate();
         bool isHibernated();
         bool isFull();
         bool isEmpty();
         bool isHeavyLoaded();
-
 };
 
 bool BaseStation::isHeavyLoaded(){
-    return (currentUsage() > getH() ? true : false);
+    return (currentUsage() > baseSim->H ? true : false);
 }
 
 double BaseStation::currentPower(unsigned duration){
@@ -278,7 +235,7 @@ bool BaseStation::executeEvent(Event event, std::vector<Event>* event_list, Simu
                 break;
             }
             else
-                return false; // Handover to another station
+                return false; // Redirect to another station
 
         case eventType::Departure: // User departs
             //users_list.pop_back();
@@ -316,24 +273,27 @@ bool BaseStation::isEmpty(){
 }
 
 bool BaseStation::isFull(){
-    if(users == num_of_resources())
+    if(users == baseSim->R)
         return true;
     return false;
 }
 
-class Network: public Config{
+class Network{
     public:
         std::vector<BaseStation> stations;
         std::vector<Event> events_list;
         double total_usage, total_power;
         unsigned next_event_time, next_user;
         int triggered_station_id;
-        Network(){
+        Simulation* netSim = nullptr; // scope to all Network methods
+        Network(Simulation* sim){
+            netSim = sim;
+            assert(netSim);
             total_usage = 0.00; total_power = 0.00;
             triggered_station_id = -1;
             stations.clear(); events_list.clear();
-            for(unsigned i=0;i<num_of_stations();i++){
-                BaseStation station;
+            for(unsigned i=0;i<netSim->N;i++){
+                BaseStation station(sim);
                 station.id = i;
                 stations.push_back(station);
             }
@@ -377,9 +337,9 @@ class Network: public Config{
 };
 
 void Network::init(Simulation* sim){ // Initialize network
-    for (unsigned i=0;i<num_of_stations();i++){
-        if (sim->disable_sleep) { stations[i].activate(); }
-        if (!i) { stations[i].activate(); } //Activate only one station at first
+    for (unsigned i=0;i<sim->N;i++){
+        if (sim->disable_sleep) { stations[i].activate(); } // Activate all stations
+        if ( i == 0) { stations[i].activate(); } // Activate only one station at first
         events_list.push_back(stations[i].scheduleEvent(sim)); // Schedule first arrival events at all stations
     }
     scheduleIntensityChange(sim);
@@ -412,7 +372,7 @@ void Network::executeStationEvent(Event event, Simulation* sim){
         //stations[event.sid].activate();
         wakeup_station.scheduled_state_change = false;
         overloaded_station.triggered = false;
-        assert(!(overloaded_station.users>num_of_resources() || wakeup_station.users>num_of_resources()));
+        assert(!(overloaded_station.users > sim->R || wakeup_station.users > sim->R));
         if (local_debug){
             printUsersAtStations();
             printStateOfAllStations();
@@ -427,7 +387,7 @@ void Network::executeStationEvent(Event event, Simulation* sim){
         for (auto s : stations){
             if((!s.isHibernated()) && (s.id != station_to_hibernate.id) /*DO NOT CONSIDER STATION ITSELF*/){
                 active_stations_ids.push_back(s.id);
-                free_slots += (num_of_resources() - s.users);
+                free_slots += (sim->R - s.users);
             }
         }
         assert(active_stations_ids.size() != 0);
@@ -441,7 +401,16 @@ void Network::executeStationEvent(Event event, Simulation* sim){
 
         if (users_to_transfer > free_slots){
             unsigned users_to_drop = users_to_transfer - free_slots;
-            
+
+                // Check if amount of events for station is equal users to transfer
+                /*unsigned counter = 0;
+                for (auto e : events_list){
+                    if((e.sid == station_to_hibernate.id) && (e.type == eventType::Departure)){
+                        counter++;
+                    }
+                }
+                assert(counter == users_to_transfer);*/
+
                 for (int i=0;i<events_list.size();i++){
                     if (users_to_transfer == free_slots){
                         break;
@@ -452,55 +421,78 @@ void Network::executeStationEvent(Event event, Simulation* sim){
                         users_to_transfer--;
                         station_to_hibernate.users--;
                         station_to_hibernate.users_rejected++;
+                        i--; // Must have so that we never skip an event after removal
                     }
                 }
-            if (false/*local_debug*/){
+
+            if (local_debug){
                 std::cout<<users_to_drop<<" users will be dropped."<<std::endl;
                 std::cout<<"After dropping users:"<<users_to_transfer<<std::endl;
             }
         }
-    
-        assert (users_to_transfer <= free_slots)
+        assert (users_to_transfer <= free_slots); // Should always work now
+
         unsigned division = users_to_transfer/num_of_active_stations;
         std::vector<unsigned> users_per_station = {};
         bool split = false;
 
         if (num_of_active_stations > 1){
-            if (true/*local_debug*/){
+            bool even = (users_to_transfer%2 == 0) ? true : false;
+            if (local_debug){
                 printUsersAtStations();
                 std::cout<<"There is more than 1 station active ("<<num_of_active_stations<<")"<<std::endl;
                 std::cout<<"Trying to split users evenly..."<<std::endl;
-                if (users_to_transfer%num_of_active_stations){
+                if (!even){
                     std::cout<<"Warn: The number of users to transfer("<<
                     users_to_transfer<<") is not divisible by num of active stations."<<std::endl;
                 }
             }
-            unsigned loc_counter = 0;
-            unsigned last_station_id = active_stations_ids.back();
-            for (auto idx : active_stations_ids){
-                if (idx == last_station_id){ //Transfer all remaining users to last station
-                    users_per_station.push_back(users_to_transfer-loc_counter);
-                    break;
-                }
+
+
+            // Here eval if users will fit to station and adjust ratio
+                // Cases:
+                // 0: Fit 1: Fit -> div div
+                // 1: Won't fit 1: Fit -> max rest
+                // 2: Fit : Won't fit -> rest max
+                // 3: Won't fit : Won't fit -> assert 
+
+            bool will_fit1 = ((sim->R - stations[active_stations_ids[0]].users) > division) ? true : false;
+            bool will_fit2 = ((sim->R - stations[active_stations_ids[1]].users) > (even ? division : division + 1)) ? true : false;
+
+            if (will_fit1 && will_fit2){
                 users_per_station.push_back(division);
-                loc_counter += division;
+                users_per_station.push_back(even ? division : division+1);
+                    
             }
+            else if (will_fit1 && !will_fit2){
+                users_per_station.push_back(users_to_transfer - (sim->R - stations[active_stations_ids[1]].users));
+                users_per_station.push_back(sim->R - stations[active_stations_ids[1]].users);
+            }
+            else if (!will_fit1 && will_fit2){
+                users_per_station.push_back(sim->R - stations[active_stations_ids[0]].users);
+                users_per_station.push_back(users_to_transfer - (sim->R - stations[active_stations_ids[0]].users));
+            }
+            else{
+                assert(false);
+            }
+
             assert(users_per_station.size() == active_stations_ids.size());
-            if(true /*local_debug*/){
+            if(local_debug){
                 printUsersAtStations();
                 std::cout<<"Evaluated divison..."<<std::endl;
                 for (unsigned i=0;i<active_stations_ids.size();i++){
                     std::cout<<"Station"<<active_stations_ids[i]<<" -> "<<users_per_station[i]<<std::endl;
                 }
-                split = true;
+                split = false;
             }
         } 
         else{
             users_per_station.push_back(division);
         }
+
         assert(!users_per_station.empty());
     
-        if (split || local_debug){
+        if (local_debug){
             std::cout<<"division:"<<division<<std::endl;
             std::cout<<"users to transfer:"<<users_to_transfer<<std::endl;
             std::cout<<"station/stations ID to transfer:";
@@ -514,17 +506,8 @@ void Network::executeStationEvent(Event event, Simulation* sim){
         unsigned users_transfered = 0;
 
         for (unsigned i=0;i<active_stations_ids.size();i++){
-            //if (users_transfered == users_to_transfer){
-            //    break; 
-            //}
 
             BaseStation& station_to_transfer = stations[active_stations_ids[i]];
-            unsigned capacity = num_of_resources() - station_to_transfer.users; // see if fits
-            if ((capacity < users_per_station[i]) && (station_to_transfer.id != active_stations_ids.back())){
-                // then just give those users to next station
-                users_per_station[active_stations_ids.back()] += users_per_station[i] - capacity;
-                users_per_station[i] -= capacity;
-            }
             
             unsigned station_transfers = 0;
 
@@ -546,12 +529,12 @@ void Network::executeStationEvent(Event event, Simulation* sim){
         station_to_hibernate.deactivate();
         station_to_hibernate.scheduled_state_change = false;
         //stations[event.sid].triggered = false;
-        if (split || local_debug){
+        if (local_debug){
             printUsersAtStations();
             printStateOfAllStations();
         }
         for (auto s : stations){
-            if (s.users > num_of_resources()){
+            if (s.users > sim->R){
                 printUsersAtStations();
                 std::cout<<"act were:"<<active_stations_ids.size()+1<<std::endl;
                 std::cout<<"ids:"<<active_stations_ids.back()<<std::endl;
@@ -566,7 +549,7 @@ void Network::executeStationEvent(Event event, Simulation* sim){
 
 bool Network::anyStationToHibernate(){
     for (auto s : stations){
-        if(s.currentUsage()<getL())
+        if(s.currentUsage() < netSim->L)
             return true;
     }
     return false;
@@ -589,7 +572,7 @@ void Network::stationManagement(Simulation* sim){
     unsigned overload_station_id = -1;
     if(!allStationsActive()){
         unsigned loaded_stations = get_number_of_heavy_loaded_stations();
-        if (loaded_stations != 0 && loaded_stations != num_of_stations()){
+        if (loaded_stations != 0 && loaded_stations != netSim->N){
             for (auto &s : stations){
                 if (s.isHeavyLoaded() && !s.triggered){
                     overload_station_id = s.id;
@@ -629,7 +612,7 @@ void Network::stationManagement(Simulation* sim){
         return;
     for (auto s : stations){
         if(!s.isHibernated() && !isOnlyActiveStation(s.id)){
-            if(s.currentUsage()<getL() && !s.scheduled_state_change){
+            if(s.currentUsage() < sim->L && !s.scheduled_state_change){
                 hibernate_station = true;
                 station_to_hib_id = s.id;
             }
@@ -653,7 +636,7 @@ void Network::stationManagement(Simulation* sim){
 unsigned Network::get_number_of_heavy_loaded_stations(){
     unsigned res = 0;
     for (auto s : stations){
-        if (s.currentUsage() > getH())
+        if (s.currentUsage() > netSim->H)
             res++;
     }
     return res;
@@ -687,7 +670,7 @@ void Network::getNetStats(unsigned duration){
 }
 
 void Network::calcStationsPower(unsigned duration){
-    for (unsigned i=0;i<num_of_stations();i++){
+    for (unsigned i=0;i<netSim->N;i++){
         if (stations[i].scheduled_state_change) { // Transition
             stations[i].power += static_cast<double>(duration)*(1000/50); 
         }
@@ -747,7 +730,7 @@ bool Network::neighbourStationHeavyLoaded(unsigned sid){
     for (auto station : stations){
         if (station.id == sid)
             continue; // Do not consider station itself
-        if (station.currentUsage() > getH())
+        if (station.currentUsage() > netSim->H)
             return true;
     }
     return false;
@@ -764,16 +747,15 @@ unsigned Network::calcTotalUsersRejected(){
 
 void Network::calcStationsUsage(unsigned duration){
     double usage = 0.00;
-    unsigned N = num_of_resources();
     for (auto x : stations){
         usage += x.currentUsage();
     }
-    total_usage+=duration*(usage/num_of_stations());
+    total_usage+=duration*(usage/netSim->N);
 }
 
 void Network::printUsersAtStations(){
     std::cout<<"------------------"<<std::endl;
-    for(unsigned i=0;i<num_of_stations();i++){
+    for(unsigned i=0;i<netSim->N;i++){
         std::cout<<"Station"<<i<<" has "<<stations[i].users<<" users."<<std::endl;
     }
 }
@@ -781,7 +763,7 @@ void Network::printUsersAtStations(){
 unsigned Network::get_id_station_least_users(){
     unsigned min = stations[0].users;
     unsigned sid = 0;
-    for(unsigned i=0;i<num_of_stations();i++){
+    for(unsigned i=0;i<netSim->N;i++){
         if (stations[i].users< min){
             min = stations[i].users;
             sid = i;
@@ -872,7 +854,7 @@ void Network::methodABC(Simulation* sim){
 }
 
 bool Network::all_stations_full(){
-    for(unsigned i=0;i<num_of_stations();i++){
+    for(unsigned i=0;i<netSim->N;i++){
         if(stations[i].isFull())
             continue;
         return false;
@@ -882,9 +864,9 @@ bool Network::all_stations_full(){
 
 bool Network::all_active_stations_full(){
     for (auto s : stations){
-        if (s.users > num_of_resources()){
+        if (s.users > netSim->R){
             printUsersAtStations();
-            assert(s.users > num_of_resources());
+            assert(s.users > netSim->R);
         }
         if (!s.isFull() && !s.isHibernated() && !s.scheduled_state_change){
             return false;
@@ -894,7 +876,7 @@ bool Network::all_active_stations_full(){
 }
 
 bool Network::all_stations_empty(){
-    for(unsigned i=0;i<num_of_stations();i++){
+    for(unsigned i=0;i<netSim->N;i++){
         if(stations[i].isEmpty())
             continue;
         return false;
@@ -904,10 +886,10 @@ bool Network::all_stations_empty(){
 
 void Network::config(){ 
     std::cout<<"--- NETWORK CONFIG ---"<<std::endl;
-    std::cout<<"N:"<<num_of_stations()<<std::endl;
-    std::cout<<"R:"<<num_of_resources()<<std::endl;
+    std::cout<<"N:"<<netSim->N<<std::endl;
+    std::cout<<"R:"<<netSim->R<<std::endl;
     //std::cout<<"SIM_END_TIME:"<<get_sim_end_time()<<" [ms]"<<std::endl;
-    for(unsigned i=0;i<num_of_stations();i++)
+    for(unsigned i=0;i<netSim->N;i++)
         std::cout<<"STATION:"<<stations[i].id<<
         " RESOURCES:"<<stations[i].resources<<std::endl;
     std::cout<<"----------------------"<<std::endl;
@@ -927,33 +909,34 @@ void simulate(Simulation* sim, Network* net, unsigned iters=10000){
     }   
     net->printUsersAtStations();
     std::cout<<"TOTAL EVENTS: "<<sim->event_counter<<std::endl;
-    std::cout<<"AVERAGE USAGE: "<<100*(net->total_usage/sim->get_sim_end_time())<<"%"<<std::endl;
-    std::cout<<"TOTAL POWER USAGE: "<<net->getTotalPowerUsage()/sim->get_sim_end_time()<<" W"<<std::endl;
+    std::cout<<"AVERAGE USAGE: "<<100*(net->total_usage/sim->end_time)<<"%"<<std::endl;
+    std::cout<<"TOTAL POWER USAGE: "<<net->getTotalPowerUsage()/sim->end_time<<" W"<<std::endl;
     std::cout<<"TOTAL USERS CREATED: "<<sim->users_counter<<std::endl;
     std::cout<<"USERS REJECTED: "<<100*(static_cast<double>(net->calcTotalUsersRejected())/sim->users_counter)<<"% ["<<net->calcTotalUsersRejected()<<"]"<<std::endl;
 }
 
-int main(void){
-    srand(time(NULL)); 
+int main(int argc, char** argv){
+    std::cout << "Have " << argc << " arguments:\n";
+    for (int i = 0; i < argc; ++i) {
+        std::cout << argv[i] << "\n";
+    }
+    srand(time(NULL)); // seed
     std::clock_t c_start = std::clock();
     freopen("simlog.txt","w",stderr);
-    Config cfg; //Create config for simulation
+
     const int num_of_simulations = 1;
-    double loc_lambda = 1.00;
     std::vector<unsigned> dropped_users = {};
+    //for (int j=0;j<10;j++){
+    //    std::cerr<<"--- RUN "<<j<<" ---"<<std::endl;
     for (int i=0;i<num_of_simulations;i++){
-        loc_lambda = 17+0.5*static_cast<double>(i);
-        Simulation sim(loc_lambda); //Init simulation with given config
+                    // N, R,   L,   H,   sim_end,  lambda
+        Simulation sim(3, 273, 0.2, 0.8, 86400000, 10.0); //Init simulation with given config
         //sim.disable_sleep = true;
-        sim.debug();
-        Network net; //Create the network
+        Network net(&sim); //Create the network
         simulate(&sim, &net);
         dropped_users.push_back(net.calcTotalUsersRejected());
         std::cerr<<"lambda: "<<sim.lambda<<" users_dropped: "<<net.calcTotalUsersRejected()<<std::endl;
         delete &sim, net;
-    }
-    for(auto d : dropped_users){
-        //std::cout<<d<<" ";
     }
 
     std::clock_t c_end = std::clock();
