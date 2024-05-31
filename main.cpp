@@ -24,33 +24,58 @@ enum Phase{ phase1 = 1, phase2 = 2, phase3 = 3, phase4 = 4, unknown = -1 };
 
 class Simulation{
     public:
-        bool dbg, disable_sleep;
+        bool dbg, disable_sleep, log;
         unsigned time, end_time;
         unsigned event_counter, users_counter;
-        unsigned hours;
-        double intensity, factor, lambda;
+        double intensity, factor, lambda, increment, lc;
         float L, H;
         unsigned N, R;
         Phase phase;
+        unsigned samples, logFrequency, logInterval;
+        unsigned simCounter, num_of_simulations, repetitons;
         Simulation(unsigned N = 3, unsigned R = 273,
                    float L = 0.2, float H = 0.8,
                    unsigned end_time = 24*60*60*1000,
                    double lambda = 5.00) {
             time = 0; this->end_time = end_time;
-            dbg = false; disable_sleep = false;
-            factor = 0.5; this->lambda = lambda /*5*/; intensity = factor*lambda;
+            dbg = false; disable_sleep = false; log = false;
+            factor = 0.5; this->lambda = lambda; intensity = factor*lambda; this->increment = 0.0;
+            this->lc = 0;
             event_counter = 0; users_counter = 0;
-            hours = 60*60*1000;
             this->N = N; this->R = R;
             this->L = L; this->H = H;
             phase = Phase::phase1;
+            this->samples = 0; this->logFrequency = 1; this->logInterval = 1000; // [ms]
+            this->simCounter = 1; this->num_of_simulations = 1; this->repetitons = 0;
         }
 
         bool run();
+        void reset();
         void debug();
-        void changeIntensity();
         void config();
+        void options();
+
+        void changeIntensity();
 };
+
+void Simulation::reset(){
+    this->time = 0;
+    this->phase = Phase::phase1;
+    this->event_counter = 0; this->users_counter = 0;
+    this->factor = 0.5;
+    this->lambda = lambda;
+    (simCounter > 1) ? this->lambda += increment : 0;
+    (simCounter > 1) ? this->L += lc : 0;
+    this->intensity = lambda * factor;
+    this->samples = 0;
+    this->logInterval = 1000;
+}
+
+void Simulation::options(){
+    std::cerr<<"[N:"<<N<<" R:"<<R<<" L:"<<L<<" H:"<<H;
+    std::cerr<<" t:"<<static_cast<float>(end_time)/(60*60*1000)<<"h"<<" lambda:"<<lambda<<" disable sleep:"<<disable_sleep;
+    std::cerr<<" nsims:"<<num_of_simulations<<" incr:"<<increment<<"]"<<std::endl;
+}
 
 void Simulation::config(){
     std::cout<<"--- SIMULATION CONFIG ---"<<std::endl;
@@ -116,7 +141,8 @@ enum class eventType{
     Departure,
     ActivateStation,
     HibernateStation,
-    Intensity
+    Intensity,
+    Log
 };
 
 class Event {
@@ -131,12 +157,11 @@ class Event {
         } /* event_time, station id, event_type */
 };
 
-bool compareEvents(Event e1, Event e2){
-    return (e1.time > e2.time);
-}
-
 void insertEvent(std::vector<Event>* events_list, Event event){
-    assert(!(events_list->size() < 2));
+    if (events_list->empty()){
+        events_list->push_back(event);
+        return;
+    }
     for (unsigned i=0;i<events_list->size();i++){
         if ((*events_list)[i].time<=event.time){
             events_list->insert(events_list->begin()+i,event);
@@ -155,10 +180,11 @@ class BaseStation{
         double power;
         bool hibernate, scheduled_state_change;
         bool overloaded, triggered;
+        unsigned asleep_time;
         Simulation* baseSim = nullptr; // scope to all BaseStation methods
         BaseStation(Simulation* sim){
+            assert(sim);
             baseSim = sim;
-            assert(baseSim);
             this->resources = baseSim->R;
             this->power = 0.00;
             this->users_rejected = 0;
@@ -167,6 +193,7 @@ class BaseStation{
             this->overloaded = false;
             this->triggered = false;
             this->users = 0;
+            this->asleep_time = 0;
         }   
         /* MAIN FUNCTIONS */
         bool executeEvent(Event, std::vector<Event>*, Simulation*, bool);
@@ -258,7 +285,6 @@ void BaseStation::getNextUserArrivalTime(Simulation* sim){
     std::mt19937 gen(rand());
     std::exponential_distribution<double> exp_dist(sim->intensity);
     next_user_time = 1000*exp_dist(gen);
-    //std::cout<<"Next user time for station "<<id<<": "<<next_user_time<<" [ms]"<<std::endl;
 }
 
 bool BaseStation::isEmpty(){
@@ -278,12 +304,11 @@ class Network{
         std::vector<BaseStation> stations;
         std::vector<Event> events_list;
         double total_usage, total_power;
-        unsigned next_event_time, next_user;
         int triggered_station_id;
         Simulation* netSim = nullptr; // scope to all Network methods
         Network(Simulation* sim){
+            assert(sim);
             netSim = sim;
-            assert(netSim);
             total_usage = 0.00; total_power = 0.00;
             triggered_station_id = -1;
             stations.clear(); events_list.clear();
@@ -303,13 +328,13 @@ class Network{
         unsigned get_id_station_least_users();
         unsigned get_id_station_not_hibernated();
         unsigned get_number_of_heavy_loaded_stations();
+        unsigned get_free_slots_active_stations();
 
         bool all_stations_empty();
         bool all_stations_full();
         bool all_active_stations_full();
         bool allStationsActive();
         bool isOnlyActiveStation(unsigned);
-        bool isStationEvent(Event);
         bool neighbourStationHeavyLoaded(unsigned);
         bool anyStationToHibernate();
         /*****************/
@@ -336,10 +361,14 @@ void Network::init(Simulation* sim){ // Initialize network
     for (unsigned i=0;i<sim->N;i++){
         if (sim->disable_sleep) { stations[i].activate(); } // Activate all stations
         if ( i == 0) { stations[i].activate(); } // Activate only one station at first
-        events_list.push_back(stations[i].scheduleEvent(sim)); // Schedule first arrival events at all stations
+        insertEvent(&events_list, stations[i].scheduleEvent(sim)); // Schedule first arrival events at all stations
+
     }
     scheduleIntensityChange(sim);
-    sort(events_list.begin(), events_list.end(), compareEvents);
+    if(sim->log){ // For constant logging intervals
+        Event event(sim->time+sim->logInterval,0,eventType::Log);
+        insertEvent(&events_list, event);
+    }
 }
 
 void Network::executeStationEvent(Event event, Simulation* sim){
@@ -407,7 +436,7 @@ void Network::executeStationEvent(Event event, Simulation* sim){
                         users_to_transfer--;
                         station_to_hibernate.users--;
                         station_to_hibernate.users_rejected++;
-                        i--; // Must have so that we never skip an event after removal
+                        i--;
                     }
                 }
 
@@ -416,7 +445,7 @@ void Network::executeStationEvent(Event event, Simulation* sim){
                 std::cout<<"After dropping users:"<<users_to_transfer<<std::endl;
             }
         }
-        assert (users_to_transfer <= free_slots); // Should always work now
+        assert (users_to_transfer <= free_slots);
 
         unsigned division = users_to_transfer/num_of_active_stations;
         std::vector<unsigned> users_per_station = {};
@@ -544,7 +573,7 @@ void Network::stationManagement(Simulation* sim){
                 if (s.isHeavyLoaded() && !s.triggered){
                     overload_station_id = s.id;
                     for (auto i : stations){
-                        if (i.isHibernated() && !i.scheduled_state_change /*AND not scheduled to activate*/){
+                        if (i.isHibernated() && !i.scheduled_state_change){
                             hib_station_id = i.id;
                         }
                     }
@@ -600,6 +629,16 @@ void Network::stationManagement(Simulation* sim){
     /****************************************/
 }
 
+unsigned Network::get_free_slots_active_stations(){
+    unsigned free_slots = 0;
+    for (auto s : stations){
+        if (!s.isHibernated()){
+            free_slots += netSim->R - s.users;
+        }
+    }
+    return free_slots;
+}
+
 unsigned Network::get_number_of_heavy_loaded_stations(){
     unsigned res = 0;
     for (auto s : stations){
@@ -610,8 +649,7 @@ unsigned Network::get_number_of_heavy_loaded_stations(){
 }
 
 void Network::scheduleIntensityChange(Simulation* sim){
-    unsigned day = /*1 +*/ (sim->end_time)/(24*60*60*1000);
-    //std::cout<<"days"<<day<<std::endl;
+    unsigned day = (sim->end_time)/(24*60*60*1000);
     const unsigned h[4] = {8,14,18,24};
     for (unsigned i=1;i<=day;i++){
         for (unsigned j=0;j<=3;j++){
@@ -621,11 +659,8 @@ void Network::scheduleIntensityChange(Simulation* sim){
     }
 }
 
-bool Network::isStationEvent(Event event){
-    return (event.type == eventType::ActivateStation || event.type == eventType::HibernateStation);
-}
-
 double Network::getTotalPowerUsage(){
+    total_power = 0;
     for (auto x : stations){
         total_power+=x.power;
     }
@@ -635,6 +670,11 @@ double Network::getTotalPowerUsage(){
 void Network::getNetStats(unsigned duration){
     calcStationsPower(duration);
     calcStationsUsage(duration);
+    for (auto &s : stations){
+        if (s.isHibernated()){
+            s.asleep_time += duration;
+        }
+    }
 }
 
 void Network::calcStationsPower(unsigned duration){
@@ -789,7 +829,6 @@ void Network::methodABC(Simulation* sim){
 
     sim->time = next_event.time; // Increment sim time to nearest event
     /**********************************/
-
     /*** Phase B: Execution of events  ***/
     while (true){ // Execute all events with the same occurance time
         assert(next_event.time == sim->time);
@@ -799,6 +838,14 @@ void Network::methodABC(Simulation* sim){
             case eventType::HibernateStation:
                 executeStationEvent(next_event, sim);
                 break;
+            case eventType::Log:
+                { 
+                std::cerr<<"usage: "<<getCurrentUsage()<<" % "<<"time: "<<sim->time<<std::endl;
+                Event event(sim->time+sim->logInterval, 0, eventType::Log);
+                insertEvent(&events_list, event);
+                sim->event_counter--;
+                break;
+                }
             default:
                 bool redirect = false;
                 if(!stations[next_event.sid].executeEvent(next_event, &events_list, sim, redirect)){
@@ -821,7 +868,6 @@ void Network::methodABC(Simulation* sim){
         }
     }
     /*************************************/
-    std::cerr<<"usage: "<<getCurrentUsage()<<" % "<<"time: "<<sim->time<<std::endl;
     /***  Phase C: Conditional events  ***/
     if (!sim->disable_sleep){
         stationManagement(sim);
@@ -840,10 +886,7 @@ bool Network::all_stations_full(){
 
 bool Network::all_active_stations_full(){
     for (auto s : stations){
-        if (s.users > netSim->R){
-            printUsersAtStations();
-            assert(s.users > netSim->R);
-        }
+        assert(s.users <= netSim->R);
         if (!s.isFull() && !s.isHibernated() && !s.scheduled_state_change){
             return false;
         }
@@ -864,33 +907,31 @@ void Network::config(){
     std::cout<<"--- NETWORK CONFIG ---"<<std::endl;
     std::cout<<"N:"<<netSim->N<<std::endl;
     std::cout<<"R:"<<netSim->R<<std::endl;
-    //std::cout<<"SIM_END_TIME:"<<get_sim_end_time()<<" [ms]"<<std::endl;
     for(unsigned i=0;i<netSim->N;i++)
         std::cout<<"STATION:"<<stations[i].id<<
         " RESOURCES:"<<stations[i].resources<<std::endl;
     std::cout<<"----------------------"<<std::endl;
 }
 
-void simulate(Simulation* sim, Network* net, unsigned iters=10000){
+void simulate(Simulation* sim, Network* net){
     sim->config(); net->config();
     net->init(sim);
-    //sim.disable_sleep = true;
-    unsigned i = 0;
-    while ( sim->run() /*&& (i<=iters)*/ ){
-        //std::cout<<"----------------------"<<std::endl;
+    while ( sim->run() ){
         net->methodABC(sim);
-        //net.printUsersAtStations();
-        //i++;
-    }   
-    net->printUsersAtStations();
+    }
+    std::cout<<"SIMULATED TIME: "<<static_cast<double>(sim->end_time)/(60*60*1000)<<" h"<<std::endl;
     std::cout<<"TOTAL EVENTS: "<<sim->event_counter<<std::endl;
     std::cout<<"AVERAGE USAGE: "<<100*(net->total_usage/sim->end_time)<<"%"<<std::endl;
-    std::cout<<"TOTAL POWER USAGE: "<<net->getTotalPowerUsage()/sim->end_time<<" W"<<std::endl;
+    std::cout<<"AVERAGE POWER USAGE: "<<net->getTotalPowerUsage()/sim->end_time<<" W"<<std::endl;
+    std::cout<<"TOTAL POWER USAGE: "<<(net->getTotalPowerUsage()/sim->end_time)*((static_cast<double>(sim->end_time))/(60*60*1000))<<" Wh"<<std::endl;
     std::cout<<"TOTAL USERS CREATED: "<<sim->users_counter<<std::endl;
     std::cout<<"USERS REJECTED: "<<100*(static_cast<double>(net->calcTotalUsersRejected())/sim->users_counter)<<"% ["<<net->calcTotalUsersRejected()<<"]"<<std::endl;
+    /*std::cerr<<"users_rejected: "<<100*(static_cast<double>(net->calcTotalUsersRejected())/sim->users_counter)<<"% "<<" L: "<<sim->L
+    <<" total_power: "<<(net->getTotalPowerUsage()/sim->end_time)*((static_cast<double>(sim->end_time))/(60*60*1000))<<" Wh"
+    <<" average_power: "<<net->getTotalPowerUsage()/sim->end_time<<" W"<<std::endl;*/
 }
 
-bool parse_input(Simulation* sim, std::vector<std::string> options, std::string& result){
+bool analyze_input(Simulation* sim, std::vector<std::string> options, std::string& result){
     if ((options.size()%2 != 0)){
         result = "Please provide value for every option.";
         return false;
@@ -900,8 +941,7 @@ bool parse_input(Simulation* sim, std::vector<std::string> options, std::string&
             i++;
             unsigned n = atoi(options[i].c_str());
             sim->N = n;
-            if (sim->N != 3)
-                sim->disable_sleep = true;
+            if (sim->N != 3) sim->disable_sleep = true;
         }
         if (options[i] == "-r"){
             i++;
@@ -913,6 +953,11 @@ bool parse_input(Simulation* sim, std::vector<std::string> options, std::string&
             float l = atof(options[i].c_str());
             sim->L = l;
         }
+        if (options[i] == "-lc"){
+            i++;
+            float lc = atof(options[i].c_str());
+            sim->lc = lc;
+        }
         if (options[i] == "-h"){
             i++;
             float h = atof(options[i].c_str());
@@ -920,7 +965,7 @@ bool parse_input(Simulation* sim, std::vector<std::string> options, std::string&
         }
         if (options[i] == "-t"){
             i++;
-            unsigned t = atoi(options[i].c_str());
+            float t = atof(options[i].c_str());
             sim->end_time = t*60*60*1000; // Sim end time is in hours
         }
         if (options[i] == "-i"){
@@ -936,10 +981,37 @@ bool parse_input(Simulation* sim, std::vector<std::string> options, std::string&
             } else if (options[i] == "f") {
                 sim->disable_sleep = false;
             } else {
-                result = "Wrong value for option:";
+                result = "Wrong value for option: ";
                 result += options[i-1];
                 return false;
             }
+        }
+        if (options[i] == "-log"){
+            i++;
+            if (options[i] == "t"){
+                sim->log = true;
+            } else if (options[i] == "f") {
+                sim->log = false;
+            } else {
+                result = "Wrong value for option: ";
+                result += options[i-1];
+                return false;
+            }
+        }
+        if (options[i] == "-runs"){
+            i++;
+            unsigned runs = atoi(options[i].c_str());
+            sim->num_of_simulations = runs;
+        }
+        if (options[i] == "-incr"){
+            i++;
+            float incr = atof(options[i].c_str());
+            sim->increment = incr;
+        }
+        if (options[i] == "-repeat"){
+            i++;
+            unsigned repeat = atoi(options[i].c_str());
+            sim->repetitons = repeat;
         }
     }
     result = "Input OK";
@@ -949,34 +1021,38 @@ bool parse_input(Simulation* sim, std::vector<std::string> options, std::string&
 int main(int argc, char** argv){
     srand(time(NULL)); // seed
     std::clock_t c_start = std::clock();
-    freopen("simlog.txt","w",stderr);
+                // N, R,   L,   H,   sim_end,  lambda
+    Simulation sim(3, 273, 0.2, 0.8, 86400000, 5.0); // Init simulation with default config
 
-    const int num_of_simulations = 1;
-    std::vector<unsigned> dropped_users = {};
-    //for (int j=0;j<10;j++){
-    //    std::cerr<<"--- RUN "<<j<<" ---"<<std::endl;
-    for (int i=0;i<num_of_simulations;i++){
-                    // N, R,   L,   H,   sim_end,  lambda
-        Simulation sim(3, 273, 0.2, 0.8, 86400000, 5.0); //Init simulation with given config
-        srand(time(NULL));
-        if (argc > 2){ // User input
-            std::vector<std::string> options;
-            std::string result;
-            options.assign(argv + 1, argv + argc);
-            if (!parse_input(&sim, options, result)){
-                std::cout<<result<<std::endl; // Error message
-                std::exit(EXIT_FAILURE);
-            }
+    if (argc > 2){ // User input
+        std::vector<std::string> options;
+        std::string result;
+        options.assign(argv + 1, argv + argc);
+        if (!analyze_input(&sim, options, result)){
+            std::cout<<"[Input Error] "<<result<<std::endl; // Error message
+            std::exit(EXIT_FAILURE);
         }
-        //std::cerr<<"--- RUN "<<i<<"  Lambda: "<<sim.lambda<<" ---"<<std::endl;
-        //sim.disable_sleep = true;
+    }
+    if (sim.log) freopen("simlog.txt", "w", stderr);
+
+    for (int i=0; i<sim.num_of_simulations; i++){
+        srand(time(NULL));
+        sim.reset();
+        std::cerr<<" --- SIM "<<sim.simCounter<<" BEGINS --- ";
+        sim.options();
         Network net(&sim); //Create the network
         simulate(&sim, &net);
-        dropped_users.push_back(net.calcTotalUsersRejected());
-        //std::cerr<<"lambda: "<<sim.lambda<<" users_dropped: "<<net.calcTotalUsersRejected()<<std::endl;
-        delete &sim, net;
+        std::cerr<<" --- SIM "<<sim.simCounter<<" ENDS ---"<<std::endl;
+        sim.simCounter++;
+        if ((sim.simCounter == sim.num_of_simulations+1) && (sim.repetitons > 0)){
+            i = -1;
+            sim.lambda = sim.lambda - (sim.simCounter-2)*sim.increment;
+            sim.L = sim.L - (sim.simCounter-2)*sim.lc;
+            sim.simCounter = 1;
+            sim.repetitons--;
+            continue;
+        }
     }
-
     std::clock_t c_end = std::clock();
     long double time_elapsed_ms = 1000.0 * (c_end-c_start) / CLOCKS_PER_SEC;
     std::cout <<std::endl<< "CPU time used: " << time_elapsed_ms << " ms\n";
